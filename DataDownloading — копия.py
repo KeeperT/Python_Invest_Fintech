@@ -213,12 +213,12 @@ def sma_cross(actual_short_sma,
                 last_price > actual_long_sma))
     crossing_sell = ((actual_short_sma < actual_long_sma) & (previous_short_sma_2 > previous_long_sma_2) & (
                 last_price < actual_long_sma))
-    if crossing_sell:
+    if crossing_sell and df_signals.loc[figi].sell_flag != 1:
         df_one_signal = pd.DataFrame([[figi, datetime.now(), last_price, 1, 0, 'SMA']],
                                      columns=['figi', "datetime", 'last_price', 'sell_flag', 'buy_flag', 'strategy_id'])
         df_one_signal.set_index('figi')
         df_signals.append(df_one_signal)
-    if crossing_buy:
+    if crossing_buy and df_signals.loc[figi].buy_flag != 1:
         df_one_signal = pd.DataFrame([[figi, datetime.now(), last_price, 0, 1, 'SMA']],
                                      columns=['figi', "datetime", 'last_price', 'sell_flag', 'buy_flag', 'strategy_id'])
         df_one_signal.set_index('figi')
