@@ -20,17 +20,22 @@ import logging
 def get_shares_list_to_csv():
     # FUNC позволяет получить из API список всех акций
     # FUNC создаёт CSV-файл c более подробными данными, чем на выходе функции
-    # На вход подаётся path папки для выгрузки файлов
     # На выход подаётся массив (Series) всех figi акций
 
-    with Client(token) as client:  # обёртка
-        all_shares = client.instruments.shares()  # запрашивает название всех акций и закладывает их в переменную
-    df_all_shares = pd.DataFrame(all_shares.instruments)  # создаёт pandas-dataframe
-    df_all_shares.reindex(['figi'])  # задаёт столбец 'figi', как индексный
-    df_all_figi = df_all_shares['figi']  # для подачи на выход функции получает массив всех figi
-    df_all_shares.to_csv('shares.csv', sep=';')  # выгружает dataframe в CSV
+    try:
+        with Client(token) as client:  # обёртка
+            all_shares = client.instruments.shares()  # запрашивает название всех акций и закладывает их в переменную
+        df_all_shares = pd.DataFrame(all_shares.instruments)  # создаёт pandas-dataframe
+        df_all_shares.reindex(['figi'])  # задаёт столбец 'figi', как индексный
+        df_all_figi = df_all_shares['figi']  # для подачи на выход функции получает массив всех figi
+        df_all_shares.to_csv('shares.csv', sep=';')  # выгружает dataframe в CSV
+        return df_all_figi
 
-    return df_all_figi
+    except:
+        print('No internet connection? Reconnecting in 60 sec...')
+        time.sleep(60)
+        get_shares_list_to_csv()
+
 
 
 def last_data_parser(figi):
@@ -81,10 +86,9 @@ def one_figi_all_candles_request(figi, last_date, df_fin_volumes, df_fin_close_p
             # print('')
 
             if os.path.exists('Historic_close_prices.csv'):  # проверяет существование файла
-                if df_fin_close_prices.loc[data, figi] != close_price:  # проверяет, есть ли уже такие данные
-                    df_fin_close_prices.loc[data, figi] = close_price  # если данных нет, записывает новые
-                if df_fin_volumes.loc[data, figi] != volume:  # проверяет, есть ли уже такие данные
-                    df_fin_volumes.loc[data, figi] = volume  # если данных нет, записывает новые
+                df_fin_close_prices.loc[data, figi] = close_price  # если данных нет, записывает новые
+                df_fin_volumes.loc[data, figi] = volume  # если данных нет, записывает новые
+
             else:
                 df_fin_close_prices.loc[data, figi] = close_price
                 df_fin_volumes.loc[data, figi] = volume
@@ -109,7 +113,6 @@ def create_2_csv_with_historic_candles():
     # выше подготовка входных данных для функций
 
         if (datetime.utcnow() - last_date).days != 0:  # проверка: не запрашиваем ли существующие в CSV данные
-            # print((datetime.utcnow() - last_date).days) TODO удалить принт
             try:
                 one_figi_all_candles_request(figi, last_date, df_fin_volumes, df_fin_close_prices)
                 time.sleep(0.601)  # не более 100 запросов API в минуту
@@ -187,7 +190,7 @@ def calc_sma():
                                     how='outer')  # добавляем данные к итоговому DataFrame df_sma_final
             df_sma2 = df_sma_final  # сохраняем итоговый DF в переменную, чтобы можно было добавить данные след. циклом
         else:
-            print('not enough data for calc SMA:', i, ',', df.size, 'rows has passed', period_of_long_sma, 'need')
+            print('not enough data to calc SMA:', i, ',', df.size, 'rows has passed', period_of_long_sma, 'need')
 
     df_sma_final.sort_index()
     df_sma_final.to_csv('SMA.csv', sep=';')
@@ -199,8 +202,10 @@ def sma_cross(actual_short_sma,
               actual_long_sma,
               df_previous_sma_saving,
               figi,
-              last_price):
+              last_price,
+              df_signals):
     # функция считает, пересекаются ли скользяшки, а далее формирует сигнал
+    # вспомогательная функция для def calc_one_signal
 
     previous_short_sma_2 = df_previous_sma_saving.loc[figi].previous_short_sma
     previous_long_sma_2 = df_previous_sma_saving.loc[figi].previous_long_sma
@@ -209,32 +214,40 @@ def sma_cross(actual_short_sma,
     crossing_sell = ((actual_short_sma < actual_long_sma) & (previous_short_sma_2 > previous_long_sma_2) & (
                 last_price < actual_long_sma))
     if crossing_sell:
-        print(figi, 'SELL')
+        df_one_signal = pd.DataFrame([[figi, datetime.now(), last_price, 1, 0, 'SMA']],
+                                     columns=['figi', "datetime", 'last_price', 'sell_flag', 'buy_flag', 'strategy_id'])
+        df_one_signal.set_index('figi')
+        df_signals.append(df_one_signal)
     if crossing_buy:
-        print(figi, 'BUY')
+        df_one_signal = pd.DataFrame([[figi, datetime.now(), last_price, 0, 1, 'SMA']],
+                                     columns=['figi', "datetime", 'last_price', 'sell_flag', 'buy_flag', 'strategy_id'])
+        df_one_signal.set_index('figi')
+        df_signals.append(df_one_signal)
 
 
-def calc_one_signal(df_all_lasts, df_previous_sma_saving, n):
+def calc_one_signal(df_all_lasts, df_previous_sma_saving, n, df_signals):
     # FUNC позволяет распарсить CSV 'SMA' и получить исторические SMA, далее по ластам считает актуальные SMA ежеминутно
+    # просчитывает все figi
     # На входе df_all_figi, df_all_historic_sma
     # На выходе актуальные SMA_short, SMA_long, а также SMA_short, SMA_long за минуту назад
+    # вспомогательная функция для def calc_signals
 
     df_all_historic_sma = pd.read_csv('SMA.csv', sep=';', index_col=0)
     for i in df_all_historic_sma.columns[::2]:
 
         # ниже получаем данные о исторических SMA из CSV
-        i = i[:12]
+        i = i[:12]  # считываем figi без лишних элементов
         df_historic_short_sma = df_all_historic_sma[f'{i}.short'].dropna()  # подготовка DF с short_SMA по figi
 
         if df_historic_short_sma.size != 0:  # проверка на пустой DF
-            historic_short_sma = df_historic_short_sma.loc[df_historic_short_sma.index.max()]
+            historic_short_sma = df_historic_short_sma.loc[df_historic_short_sma.index.max()]  # закладываем в переменную последнюю короткую SMA
         else:
             historic_short_sma = False
 
         df_historic_long_sma = df_all_historic_sma[f'{i}.long'].dropna()  # подготовка DF с long_SMA по figi
 
         if df_historic_long_sma.size != 0:  # проверка на пустой DF
-            historic_long_sma = df_historic_long_sma.loc[df_historic_long_sma.index.max()]
+            historic_long_sma = df_historic_long_sma.loc[df_historic_long_sma.index.max()]  # закладываем в переменную последнюю длинную SMA
         else:
             historic_long_sma = False
 
@@ -270,16 +283,23 @@ def calc_one_signal(df_all_lasts, df_previous_sma_saving, n):
                           actual_long_sma,
                           df_previous_sma_saving,
                           i,
-                          last_price)
+                          last_price,
+                          df_signals)
 
 
-def calc_signals():
+def calc_and_save_signals():
     # функция позволяет циклически считать сигналы на основе постоянно обновляющихся last_prices
 
     df_previous_sma_saving = pd.DataFrame(index=df_all_figi, columns=['previous_short_sma', 'previous_long_sma'])
     for n in tqdm(range(999999), desc='calculating signals'):
         df_all_lasts = get_all_lasts()
-        calc_one_signal(df_all_lasts, df_previous_sma_saving, n)
+        if not os.path.exists('Signals.csv'):
+            df_signals = pd.DataFrame(columns=['figi', "datetime", 'last_price', 'sell_flag', 'buy_flag', 'strategy_id'])
+            df_signals.set_index('figi')
+        else:
+            df_signals = pd.read_csv('Signals.csv', sep=';', index_col=0)
+        calc_one_signal(df_all_lasts, df_previous_sma_saving, n, df_signals)
+        df_signals.to_csv('Signals.csv', sep=';')
         time.sleep(15)
 
 
@@ -306,4 +326,4 @@ print('Calc of SMA done')
 print('Data saving complete')
 
 # подготовка сигналов
-calc_signals()
+calc_and_save_signals()
