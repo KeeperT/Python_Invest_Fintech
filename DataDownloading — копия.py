@@ -3,13 +3,11 @@
 # Figi - это уникальный ID акции
 
 import pandas as pd
+import numpy as np
 from tqdm import trange, tqdm
 from datetime import datetime, timedelta
 import datetime as dt
 from tinkoff.invest import *
-from tinkoff.invest.services import Services
-import numpy
-import pathlib
 import os.path
 import time
 from tinkoff.invest.utils import now
@@ -22,6 +20,7 @@ def get_shares_list_to_csv():
     # На выход подаётся массив (Series) всех figi акций
 
     try:
+        print('Downloading list of shares')
         with Client(token) as client:  # обёртка
             all_shares = client.instruments.shares()  # запрашивает название всех акций и закладывает их в переменную
         df_all_shares = pd.DataFrame(all_shares.instruments)  # создаёт pandas-dataframe
@@ -30,8 +29,9 @@ def get_shares_list_to_csv():
         df_all_shares.to_csv('shares.csv', sep=';')  # выгружает dataframe в CSV
         return df_all_figi
 
-    except:
-        print('No internet connection? Reconnecting in 60 sec...')
+    except Exception as e:
+        print('No internet connection? Reconnecting in 60 sec:')
+        print(e)
         time.sleep(60)
         get_shares_list_to_csv()
 
@@ -51,7 +51,7 @@ def last_data_parser(figi):
 
         except Exception as e:
             logging.exception(e)
-            figi_last_date = dt.datetime(2020, 1, 1)
+            figi_last_date = dt.datetime(2012, 1, 1)
 
     else:
         figi_last_date = dt.datetime(2012, 1, 1)
@@ -105,7 +105,7 @@ def create_2_csv_with_historic_candles():
         df_fin_close_prices = pd.DataFrame()  # пустой DF, если файла нет
         df_fin_volumes = pd.DataFrame()  # пустой DF, если файла нет
 
-    for i in tqdm(range(len(df_all_figi))):
+    for i in tqdm(range(len(df_all_figi)), desc='Downloading historic candles'):
         figi = df_all_figi[i]
         last_date = last_data_parser(figi)
         # выше подготовка входных данных для функций
@@ -113,9 +113,10 @@ def create_2_csv_with_historic_candles():
         if (datetime.utcnow() - last_date).days != 0:  # проверка: не запрашиваем ли существующие в CSV данные
             try:
                 one_figi_all_candles_request(figi, last_date, df_fin_volumes, df_fin_close_prices)
-                time.sleep(0.601)  # не более 100 запросов API в минуту
-            except:
-                print('Wait 60sec to download more candles, resource exhausted')
+                time.sleep(0.61)  # не более 100 запросов API в минуту
+            except Exception as e:
+                print(f'Wait 60sec to download more candles, resource exhausted:')
+                print(e)
                 time.sleep(60)
                 try:
                     one_figi_all_candles_request(figi, last_date, df_fin_volumes, df_fin_close_prices)
@@ -174,7 +175,8 @@ def calc_sma():
     df_sma2 = pd.DataFrame()  # пустой DF
     df_amount_of_sma = pd.DataFrame(columns=['amount_of_sma_rows'])  # пустой DF
 
-    for i in df_all_figi:
+    for x in tqdm(range(len(df_all_figi)), desc='Calculating_historic_SMA'):
+        i = df_all_figi[x]
         df = df_fin_close_prices[i].dropna()  # получаем для каждого figi его DF с close_prices без пустых ячеек
 
         df_sma_short = df.rolling(period_of_short_sma - 1).mean().dropna().round(3)  # скользяшки за коротк. период
@@ -240,7 +242,7 @@ def sma_cross(actual_short_sma,
         df_signals.append(df_one_signal)
 
 
-def calc_one_signal(df_all_lasts, df_previous_sma_saving, n, df_signals):
+def calc_one_signal_sma(df_all_lasts, df_previous_sma_saving, n, df_signals):
     # FUNC позволяет распарсить CSV 'SMA' и получить исторические SMA, далее по ластам считает актуальные SMA ежеминутно
     # просчитывает все figi
     # На входе df_all_figi, df_all_historic_sma
@@ -303,19 +305,19 @@ def calc_one_signal(df_all_lasts, df_previous_sma_saving, n, df_signals):
                           df_signals)
 
 
-def calc_and_save_actual_signals():
+def calc_and_save_actual_signals_sma():
     # функция позволяет циклически считать сигналы на основе постоянно обновляющихся last_prices
 
     df_previous_sma_saving = pd.DataFrame(index=df_all_figi, columns=['previous_short_sma', 'previous_long_sma'])
     for n in tqdm(range(999999), desc='calculating signals'):
         df_all_lasts = get_all_lasts()
-        if not os.path.exists('Actual_signals_SMA.csv'):
+        if not os.path.exists('Actual_signals_SMA.csv'):  # TODO тест переноса из цикла наружу
             df_signals = pd.DataFrame(
                 columns=['figi', "datetime", 'last_price', 'sell_flag', 'buy_flag', 'strategy_id'])
             df_signals.set_index('figi')
         else:
             df_signals = pd.read_csv('Actual_signals_SMA.csv', sep=';', index_col=0)
-        calc_one_signal(df_all_lasts, df_previous_sma_saving, n, df_signals)
+        calc_one_signal_sma(df_all_lasts, df_previous_sma_saving, n, df_signals)
         df_signals.to_csv('Actual_signals_SMA.csv', sep=';')
         time.sleep(15)
 
@@ -336,17 +338,18 @@ def historic_sma_cross(historic_short_sma,
     crossing_sell = ((historic_short_sma < historic_long_sma) & (
             previous_historic_short_sma > previous_historic_long_sma) & (historic_last_price < historic_long_sma))
 
+    # формирование сигнала, запись в DF
     if crossing_sell:
         df_historic_signals.loc[f'{figi}{index_of_row}'] = [figi, date, historic_last_price, 1, 0, 'SMA']
     if crossing_buy:
         df_historic_signals.loc[f'{figi}{index_of_row}'] = [figi, date, historic_last_price, 0, 1, 'SMA']
 
 
-def calc_one_historic_signal(i,
-                             df_fin_close_prices,
-                             df_all_historic_sma,
-                             amount_of_rows,
-                             df_historic_signals):
+def calc_one_historic_signal_sma(i,
+                                 df_fin_close_prices,
+                                 df_all_historic_sma,
+                                 amount_of_rows,
+                                 df_historic_signals):
     for index_of_row in range(-1, -amount_of_rows, -1):
 
         # ниже получаем данные о исторических SMA из CSV
@@ -383,7 +386,7 @@ def calc_one_historic_signal(i,
                            index_of_row)
 
 
-def calc_historic_signals():
+def calc_historic_signals_sma():
     # функция позволяет циклически считать сигналы на основе постоянно обновляющихся last_prices
 
     df_fin_close_prices = pd.read_csv('Historic_close_prices.csv', sep=';', index_col=0, parse_dates=[0])
@@ -391,28 +394,73 @@ def calc_historic_signals():
     # TODO удалить
     df_all_historic_sma = pd.read_csv('SMA.csv', sep=';', index_col=0)
     df_amount_of_sma = pd.read_csv('amount_SMA.csv', sep=';', index_col=0, parse_dates=[0])
-    df_historic_signals = pd.DataFrame(columns=['figi',
+    df_historic_signals_sma = pd.DataFrame(columns=['figi',
                                                 'datetime',
                                                 'last_price',
                                                 'sell_flag',
                                                 'buy_flag',
                                                 'strategy_id'])
-    for x in tqdm(range(len(df_all_historic_sma.columns[::2])), desc='calculating_historic_signals'):
+    for x in tqdm(range(5), desc='calculating_historic_signals'):
         i = df_all_historic_sma.columns[::2][x]
         amount_of_rows = df_amount_of_sma.amount_of_sma_rows[i[:12]]
-        calc_one_historic_signal(i,
-                                 df_fin_close_prices,
-                                 df_all_historic_sma,
-                                 amount_of_rows,
-                                 df_historic_signals)
-    df_historic_signals.set_index('figi')
-    df_historic_signals.droplevel(0, axis='columns')
-    df_historic_signals.to_csv('Historic_signals_SMA.csv', sep=';')
+        calc_one_historic_signal_sma(i,
+                                     df_fin_close_prices,
+                                     df_all_historic_sma,
+                                     amount_of_rows,
+                                     df_historic_signals_sma)
+    df_historic_signals_sma.reset_index(drop=True, inplace=True)
+    df_historic_signals_sma.set_index('figi', inplace=True)
+    df_historic_signals_sma.sort_values(by='datetime', inplace=True)
+    df_historic_signals_sma.to_csv('Historic_signals_SMA.csv', sep=';')
 
 
-# TODO допилить функцию
-def calc_profit():
-    pd.read_csv('Historic_signals_SMA.csv', sep=';', index_col=0)
+def calc_profit_sma():
+    df = pd.read_csv('Historic_signals_SMA.csv', sep=';', index_col=0)
+    for x in tqdm(range(len(df_all_figi))):
+        try:
+            i = df_all_figi[x]
+            profit = (100 * (df.loc[i].head(2).last_price.sort_values().pct_change()[1])).round(2)
+            print(profit)
+
+        except Exception as e:
+            print(e)
+
+
+def calc_historic_rsi_signals():
+    df_fin_close_prices = pd.read_csv('Historic_close_prices.csv', sep=';', parse_dates=[0], index_col=0)
+    df_historic_signals_rsi = pd.DataFrame(columns=['figi',
+                                                    'buy_flag',
+                                                    'sell_flag',
+                                                    'rsi_float',
+                                                    'date'])  # пустой DF
+
+    # расчет по формуле RSI
+    delta = df_fin_close_prices.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ema_up = up.ewm(com=14, adjust=False).mean()  # 14 - значение для экспоненциальной скользяшки
+    ema_down = down.ewm(com=14, adjust=False).mean()  # 14 - значение для экспоненциальной скользяшки
+    rs = ema_up / ema_down
+    rsi = (100 - (100 / (1 + rs))).round(2)
+    rsi.to_csv('Historic_RSI.csv', sep=';')
+
+    for x in tqdm(range(len(df_all_figi)), desc='calculating_rsi_signals'):
+        figi = df_all_figi[x]
+        upper_rsi = np.nanpercentile(rsi[figi], 95)  # верхняя граница RSI, значение 95 отсеивает RSI примерно выше 70
+        lower_rsi = np.nanpercentile(rsi[figi], 2.5)  # нижняя граница RSI, значение 2.5 отсеивает RSI примерно ниже 30
+        for y in range(len(rsi[figi])):  # проверка DF rsi на условие upper_rsi, lower_rsi
+            rsi_float = rsi[figi][y]
+            date = f'date: {rsi.index[y]}'
+            if rsi_float >= upper_rsi:
+                df_historic_signals_rsi.loc[f'{figi}-{y}'] = [figi, 0, 1, rsi_float, date]
+            if rsi_float <= lower_rsi:
+                df_historic_signals_rsi.loc[f'{figi}-{y}'] = [figi, 1, 0, rsi_float, date]
+
+    df_historic_signals_rsi.reset_index(drop=True, inplace=True)
+    df_historic_signals_rsi.set_index('figi', inplace=True)
+    df_historic_signals_rsi.sort_values(by='date', inplace=True)
+    df_historic_signals_rsi.to_csv('historic_signals_RSI.csv', sep=';')
+
 
 
 # первоначальные настройки
@@ -425,21 +473,24 @@ period_of_long_sma = 200  # дней
 
 # подготовка исторических данных
 df_all_figi = get_shares_list_to_csv()
-print('Downloading historic candles:')
-# create_2_csv_with_historic_candles()
-print('Downloading success')
+create_2_csv_with_historic_candles()
+print('Downloading historic candles success')
 
-# подготовка исторических индикаторов
-# calc_std()
+# расчет исторических индикаторов
+calc_std()
 print('Calc of STD done')
-print('Calc of SMA starts:')
-# calc_sma()
+calc_sma()
 print('Calc of SMA done')
-print('Data saving complete')
+print('All data saving complete')
 
 # подготовка исторических сигналов
-calc_historic_signals()
+calc_historic_signals_sma()
 print('Historic_signals_are_saved')
+
+calc_profit_sma()
+print('Calculation_of_profit_is_done')
+
+calc_historic_rsi_signals()
 
 # подготовка реальных сигналов
 # calc_and_save_actual_signals()
